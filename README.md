@@ -81,8 +81,26 @@
 
   1. 使用 Docker 客户端或任何支持 Docker Registry API 的工具访问你的代理服务。
   2. 示例命令：
-     * 搜索并拉取镜像：`docker search https://docker.arelay.cn/library/nginx`
-     * 拉取镜像：`docker pull docker.arelay.cn/library/nginx:latest`
+     * 搜索并拉取镜像：
+       ```bash
+       docker search https://docker.arelay.cn/library/nginx
+       ```
+     * 拉取镜像：
+
+       ```bash
+       docker pull docker.arelay.cn/library/nginx:latest
+       ```
+  3.一键设置镜像加速：修改文件 /etc/docker/daemon.json（如果不存在则创建）
+  
+       sudo mkdir -p /etc/docker
+       sudo tee /etc/docker/daemon.json <<-'EOF'
+       {
+         "registry-mirrors": ["docker.arelay.cn"]
+       }
+       EOF
+       sudo systemctl daemon-reload
+       sudo systemctl restart docker
+
 
 ### 步骤八：监控与维护
 
