@@ -33,9 +33,58 @@
   * **UA** ：用于补充屏蔽爬虫的 UA 列表，多个 UA 之间用逗号分隔。
   * **URL** ：指定首页要加载的外部页面 URL，若设置为 “nginx”，则首页显示 nginx 伪装页；若设置其他有效 URL，则加载对应页面。
   * **URL302** ：用于设置首页的临时重定向目标地址，当有值时，访问首页会重定向到该地址。
+    
+   修改 `worker.js` 中下列代码中`https://kuwinet.github.io/d-proxy` 配置 Docker 镜像搜索页面：
+   ```bash
+   const response = await fetch('https://kuwinet.github.io/d-proxy'); // 替换为实际的外部网页 URL
+   ```
 
 ## 注意事项
 
   1. 本项目依赖 Cloudflare Workers 环境运行，需先注册并配置好 Cloudflare 账号及相关设置。
   2. 在使用过程中，请确保遵守各镜像源的服务条款和使用政策，合理使用代理服务。
   3. 若遇到请求失败或其他问题，可查看 Cloudflare Workers 的日志信息，根据报错提示进行排查和解决。
+
+## 如何使用
+
+### 步骤一：注册与登录 Cloudflare
+
+  1. 访问 [Cloudflare 官网](https://www.cloudflare.com/) 并注册账号。
+  2. 登录后，添加你的域名并完成相关配置。
+
+### 步骤二：创建 Cloudflare Worker
+
+  1. 在 Cloudflare 仪表盘中，点击 “Workers” 选项。
+  2. 点击 “Create a Worker” 按钮，进入代码编辑界面。
+
+### 步骤三：部署代码
+
+  1. 将上述提供的完整代码粘贴到 Cloudflare Worker 的代码编辑器中。
+  2. 点击 “Save and Continue” 保存代码。
+
+### 步骤四：配置环境变量（可选）
+
+  1. 在 Worker 的 “Settings” 页面中，找到 “Variables” 部分。
+  2. 添加你需要的环境变量，如 UA、URL 或 URL302。
+
+### 步骤五：发布 Worker
+
+  1. 在代码编辑器页面，点击 “Deploy” 按钮。
+  2. 选择 “Deploy to production” 将 Worker 发布到生产环境。
+
+### 步骤六：配置域名解析（可选）
+
+  1. 在 Cloudflare 仪表盘中，进入 “DNS” 页面。
+  2. 添加一条 A 记录或 CNAME 记录，将你的自定义域名指向 Cloudflare 分配的 Worker URL。
+
+### 步骤七：使用代理服务
+
+  1. 使用 Docker 客户端或任何支持 Docker Registry API 的工具访问你的代理服务。
+  2. 示例命令：
+     * 搜索并拉取镜像：`docker search https://docker.arelay.cn/library/nginx`
+     * 拉取镜像：`docker pull docker.arelay.cn/library/nginx:latest`
+
+### 步骤八：监控与维护
+
+  1. 在 Cloudflare 仪表盘中，查看 Worker 的运行状态和统计信息。
+  2. 定期检查日志，及时处理可能出现的错误或性能问题。
