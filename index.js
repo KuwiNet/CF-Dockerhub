@@ -15,11 +15,12 @@
  */
 
 import worker from './worker.js'
+import mirrors from './mirrors.js'
 
 const SEARCH_PAGE_SIZE = 25
 const SEARCH_CACHE_TTL = 600
-// 单个上游最多等 6 秒：上游挂住时也不能让页面一直转圈（Workers 本身没有请求超时）
-const SEARCH_TRY_TIMEOUT = 6000
+// 单个上游最多等 4 秒：上游挂住时也不能让页面一直转圈（Workers 本身没有请求超时）
+const SEARCH_TRY_TIMEOUT = 4000
 const SEARCH_UA =
 	'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
 
@@ -108,10 +109,9 @@ function headers() {
 	}
 }
 
-/** 依次尝试上游，返回 { data, from, attempts } */
+/** 并发尝试上游（谁先成功用谁），返回 { data, from, attempts }；全失败也总共只等一个超时 */
 async function querySearch(q, page) {
-	const attempts = []
-	for (const up of UPSTREAMS) {
+	const jobs = UPSTREAMS.map(async (up) => {
 		const started = Date.now()
 		const url = up.url(q, page)
 		try {
@@ -121,16 +121,131 @@ async function querySearch(q, page) {
 				cf: { cacheTtl: 300, cacheEverything: true },
 			})
 			const text = await res.text()
-			attempts.push({ name: up.name, status: res.status, ms: Date.now() - started, head: text.slice(0, 120) })
-			if (!res.ok) continue
+			const rec = { name: up.name, status: res.status, ms: Date.now() - started, head: text.slice(0, 120) }
+			if (!res.ok) return { up, rec }
 			const data = up.json ? up.parse(JSON.parse(text)) : up.parse(text)
-			if (!data || !data.items) continue
-			return { data, from: up.name, attempts }
+			if (!data || !data.items) return { up, rec }
+			return { up, rec, data }
 		} catch (err) {
-			attempts.push({ name: up.name, status: 0, ms: Date.now() - started, error: (err && err.message) || 'unknown' })
+			return { up, rec: { name: up.name, status: 0, ms: Date.now() - started, error: (err && err.message) || 'unknown' } }
 		}
+	})
+	const results = await Promise.all(jobs)
+	const attempts = results.map((r) => r.rec)
+	for (const up of UPSTREAMS) {
+		const hit = results.find((r) => r.up === up && r.data)
+		if (hit) return { data: hit.data, from: up.name, attempts }
 	}
 	return { data: null, from: '', attempts }
+}
+
+/**
+ * 内置镜像索引（mirrors.js，141 个 Docker 官方镜像，离线数据）
+ * 每行：[名称, 是否官方, star 数, 拉取数, 描述]
+ *
+ * 为什么需要它：hub.docker.com 的 Web 搜索接口对 Cloudflare 出口 IP 长期 429，
+ * 只靠上游实时搜索等于"永远没结果"。本地索引保证常见镜像一定能搜到，
+ * 上游能通时仍然优先用上游（结果更新、覆盖非官方镜像）。
+ */
+const LOCAL_INDEX = Array.isArray(mirrors) ? mirrors : []
+
+function localSearch(q, limit) {
+	const needle = String(q || '').trim().toLowerCase()
+	if (!needle) return []
+	const out = []
+	for (const row of LOCAL_INDEX) {
+		const name = row[0] || ''
+		if (!name) continue
+		const lower = name.toLowerCase()
+		let score = 0
+		if (lower === needle) score = 100
+		else if (lower.startsWith(needle)) score = 80
+		else if (lower.includes(needle)) score = 60
+		else if (String(row[4] || '').toLowerCase().includes(needle)) score = 20
+		if (!score) continue
+		out.push({
+			repo: name,
+			official: !!row[1],
+			stars: row[2] || null,
+			pulls: row[3] || null,
+			desc: row[4] || '',
+			score,
+		})
+	}
+	out.sort((a, b) => b.score - a.score || (b.pulls || 0) - (a.pulls || 0) || a.repo.length - b.repo.length)
+	return out.slice(0, limit || 40).map(({ score, ...rest }) => rest)
+}
+
+/** 把 DOCKER_AUTH 编成 Basic 头（与 worker.js 的 normalizeDockerAuth 保持一致） */
+function basicAuth(env) {
+	const raw = String((env && env.DOCKER_AUTH) || '').trim().replace(/^basic\s+/i, '')
+	if (!raw) return ''
+	if (!raw.includes(':')) return 'Basic ' + raw
+	try {
+		return 'Basic ' + btoa(raw)
+	} catch (err) {
+		const bytes = new TextEncoder().encode(raw)
+		let bin = ''
+		for (const b of bytes) bin += String.fromCharCode(b)
+		return 'Basic ' + btoa(bin)
+	}
+}
+
+/**
+ * 用 registry 校验镜像是否存在——知道完整名字时最可靠的"搜索"。
+ * 走 registry.docker.io + DOCKER_AUTH 的账号额度，不受 hub.docker.com 的 Web 搜索限流影响。
+ * 单段名字先当官方镜像（library/x）试，再当"同名命名空间"（x/x）试。
+ */
+async function probeOne(repo, auth) {
+	try {
+		const tokenUrl =
+			'https://auth.docker.io/token?service=registry.docker.io&scope=repository:' +
+			encodeURIComponent(repo) + ':pull'
+		const tokenRes = await fetch(tokenUrl, {
+			headers: auth ? { authorization: auth } : {},
+			signal: AbortSignal.timeout(2500),
+		})
+		if (!tokenRes.ok) return { kind: 'error' }
+		const token = (await tokenRes.json()).token
+		if (!token) return { kind: 'error' }
+		const res = await fetch('https://registry-1.docker.io/v2/' + repo + '/manifests/latest', {
+			headers: {
+				authorization: 'Bearer ' + token,
+				accept:
+					'application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, ' +
+					'application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json',
+			},
+			signal: AbortSignal.timeout(5000),
+		})
+		if (res.status === 404 || res.status === 401) return { kind: 'notfound' }
+		if (res.status !== 200) return { kind: 'error' }
+		return {
+			kind: 'ok',
+			repo,
+			digest: res.headers.get('docker-content-digest') || '',
+			official: repo.startsWith('library/'),
+		}
+	} catch (err) {
+		return { kind: 'error' }
+	}
+}
+
+async function registryProbe(q, env) {
+	const raw = String(q || '').trim().replace(/^\/+/, '')
+	if (!raw || raw.length > 120) return null
+	const auth = basicAuth(env)
+	if (raw.includes('/')) {
+		const hit = await probeOne(raw, auth)
+		return hit.kind === 'ok' ? hit : null
+	}
+	const started = Date.now()
+	const first = await probeOne('library/' + raw, auth)
+	if (first.kind === 'ok') return first
+	// 官方库里没有（401/404），再当"同名命名空间"试一次；超过预算就直接放弃
+	const spent = Date.now() - started
+	if (spent > 6000) return null
+	const second = await probeOne(raw + '/' + raw, auth)
+	return second.kind === 'ok' ? second : null
 }
 
 function pullCard(q, base) {
@@ -151,7 +266,7 @@ function resultRows(items, base) {
 		.map((r) => {
 			const repo = r.repo || ''
 			const official = r.official || /^library\//.test(repo)
-			const desc = r.desc || '（无描述）'
+			const desc = r.desc || (official ? 'Docker 官方镜像' : '（无描述）')
 			const pull = 'docker pull ' + base.replace(/^https?:\/\//, '') + '/' + repo
 			const badge = official ? '<span class="badge">官方</span>' : ''
 			const stars = r.stars == null ? '' : '<span class="meta">★ ' + esc(r.stars) + '</span>'
@@ -165,14 +280,27 @@ function resultRows(items, base) {
 		.join('')
 }
 
-function searchPage({ q, page, total, items, base, error }) {
+function searchPage({ q, page, total, items, base, error, source }) {
 	const pages = Math.max(1, Math.ceil((total || 0) / SEARCH_PAGE_SIZE))
 	const prev = page > 1 ? '<a href="/search?q=' + encodeURIComponent(q) + '&page=' + (page - 1) + '">← 上一页</a>' : '<span></span>'
 	const next = page < pages ? '<a href="/search?q=' + encodeURIComponent(q) + '&page=' + (page + 1) + '">下一页 →</a>' : '<span></span>'
-	const summary = error
-		? '<p class="empty">Docker Hub 的搜索接口当前限流（' + esc(error) + '），可以先按上面那条命令直接拉取；' +
-			'需要浏览搜索结果时，可打开 <a class="outlink" href="https://hub.docker.com/search?q=' + encodeURIComponent(q) + '" target="_blank" rel="noreferrer">Docker Hub 官方搜索</a>。</p>'
-		: '<p class="summary">共 ' + esc(total) + ' 个结果 · 第 ' + esc(page) + ' / ' + esc(pages) + ' 页</p>'
+	let summary
+	if (error) {
+		summary =
+			'<p class="empty">Docker Hub 的搜索接口当前限流（' + esc(error) + '），可以先按上面那条命令直接拉取；' +
+			'如果知道完整镜像名（如 <code>afrp/afrp</code>），把它填进搜索框，站点会直接去 registry 校验它是否存在。' +
+			'也可以打开 <a class="outlink" href="https://hub.docker.com/search?q=' + encodeURIComponent(q) + '" target="_blank" rel="noreferrer">Docker Hub 官方搜索</a>。</p>'
+	} else if (source === 'local') {
+		summary =
+			'<p class="empty" style="margin-bottom:14px">以下结果来自<b>内置镜像索引</b>（' + LOCAL_INDEX.length + ' 个 Docker 官方镜像，离线数据）。' +
+			'Docker Hub 的实时搜索接口当前对本站出口 IP 限流，所以没有联网结果；要搜非官方镜像，请在地址里填完整名字，例如 <code>/search?q=afrp/afrp</code>，站点会直接去 registry 校验。' +
+			'<a class="outlink" href="https://hub.docker.com/search?q=' + encodeURIComponent(q) + '" target="_blank" rel="noreferrer">到 Docker Hub 搜</a></p>'
+	} else if (source === 'registry') {
+		summary =
+			'<p class="empty" style="margin-bottom:14px">实时搜索被限流，已改用 <b>registry 校验</b>：这个镜像确实存在（走本站的账号额度，不受 Web 搜索限流影响）。</p>'
+	} else {
+		summary = '<p class="summary">共 ' + esc(total) + ' 个结果 · 第 ' + esc(page) + ' / ' + esc(pages) + ' 页</p>'
+	}
 	return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -272,27 +400,62 @@ async function handleSearch(request, url, env, ctx, path) {
 
 	// 诊断端点
 	if (path === '/search/_debug') {
+		const local = localSearch(q || 'nginx', 5)
 		const r = await querySearch(q || 'nginx', page)
-		return new Response(JSON.stringify({ q, page, from: r.from, attempts: r.attempts }, null, 2), {
-			status: r.data ? 200 : 502,
-			headers: { 'content-type': 'application/json; charset=utf-8' },
-		})
+		return new Response(
+			JSON.stringify({
+				q,
+				page,
+				localIndex: LOCAL_INDEX.length,
+				localHits: local.map((x) => x.repo),
+				from: r.from,
+				attempts: r.attempts,
+			}, null, 2),
+			{
+				status: r.data ? 200 : 502,
+				headers: { 'content-type': 'application/json; charset=utf-8' },
+			}
+		)
 	}
 
 	let payload = q ? await readCache(q, page) : null
+	const fromCache = !!payload
 	let error = ''
 	if (!payload && q) {
-		const r = await querySearch(q, page)
-		if (r.data) {
-			payload = { total: r.data.total, items: r.data.items, from: r.from, at: new Date().toISOString() }
-			await writeCache(q, page, payload, ctx)
+		// 1) 先查本地索引：命中就不必等上游超时，常见镜像立刻出结果
+		const local = localSearch(q, SEARCH_PAGE_SIZE)
+		if (local.length) {
+			payload = { total: local.length, items: local, from: 'local' }
 		} else {
-			const last = r.attempts[r.attempts.length - 1] || {}
-			error = r.attempts.map((a) => a.name + ':' + (a.status || a.error)).join(' / ') || (last.error || '429')
+			// 2) 本地没有 → 先问 registry：一次目录级校验比等上游快得多，也不受 Web 搜索限流影响
+			const probe = await registryProbe(q, env)
+			if (probe) {
+				payload = {
+					total: 1,
+					items: [{
+						repo: probe.repo,
+						desc: probe.digest ? 'registry 校验通过 · latest digest ' + probe.digest : 'registry 校验通过',
+						stars: null,
+						pulls: null,
+						official: probe.official,
+					}],
+					from: 'registry',
+				}
+			} else {
+				// 3) registry 里也没这个名字 → 再试实时上游（并发，最坏只等一个超时）
+				const r = await querySearch(q, page)
+				if (r.data) {
+					payload = { total: r.data.total, items: r.data.items, from: r.from, at: new Date().toISOString() }
+					await writeCache(q, page, payload, ctx)
+				} else {
+					const last = r.attempts[r.attempts.length - 1] || {}
+					error = r.attempts.map((a) => a.name + ':' + (a.status || a.error)).join(' / ') || (last.error || '429')
+				}
+			}
 		}
 	}
 	if (!payload) payload = { total: 0, items: [] }
-	const cached = !!payload.at && !!q && !error
+	const cached = fromCache
 
 	if (wantsJson) {
 		return new Response(
@@ -311,7 +474,7 @@ async function handleSearch(request, url, env, ctx, path) {
 		)
 	}
 
-	return new Response(searchPage({ q, page, total: payload.total, items: payload.items, base, error }), {
+	return new Response(searchPage({ q, page, total: payload.total, items: payload.items, base, error, source: payload.from }), {
 		status: 200,
 		headers: {
 			'content-type': 'text/html; charset=UTF-8',
