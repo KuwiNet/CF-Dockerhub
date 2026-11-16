@@ -116,12 +116,15 @@ def e2e_pull(base, repo, tag, host=None):
     accept = ACCEPT
     qs = ("?hubhost=" + host) if host else ""
     service = host or "registry.docker.io"
-    h = {"Accept": accept}
+    # 像 docker 客户端一样先换 token：开了 CACHE_TTL 时 manifest 可能直接命中缓存返回 200，
+    # 所以不能依赖"首个请求一定 401"来触发换取 token，否则后续 blob 会因缺 Authorization 得到 401。
+    status, headers, _ = request(base, "/v2/" + qs)
+    token = token_from_challenge(base, header(headers, "www-authenticate") or "", repo, service)
+    h = dict({"Accept": accept}, **({"Authorization": "Bearer " + token} if token else {}))
     status, headers, body = request(base, "/v2/%s/manifests/%s%s" % (repo, tag, qs), h)
     if status == 401:
-        # 用目标仓库自己的挑战换 token（ghcr / quay 的 realm 与 docker.io 不同）
-        challenge = header(headers, "www-authenticate") or ""
-        token = token_from_challenge(base, challenge, repo, service)
+        # 挑战里带了目标仓库自己的 realm（ghcr / quay 与 docker.io 不同），再试一次
+        token = token_from_challenge(base, header(headers, "www-authenticate") or "", repo, service)
         if token:
             h["Authorization"] = "Bearer " + token
             status, headers, body = request(base, "/v2/%s/manifests/%s%s" % (repo, tag, qs), h)

@@ -3,9 +3,10 @@ main = "worker.js"
 compatibility_date = "2024-11-01"
 
 # 自定义域名（在 Cloudflare 控制台加 Custom Domain，或用下面的 routes）
+# 注意：name 必须与线上已有的 Worker 服务名一致，否则会新建 Worker 而域名仍指向旧的
 # [[routes]]
-# pattern = "docker.example.com/*"
-# zone_name = "example.com"
+# pattern = "docker.arelay.cn/*"
+# zone_name = "arelay.cn"
 
 [observability]
 enabled = true
@@ -16,6 +17,7 @@ enabled = true
 # URL302 = "https://example.com"
 # UA = "netcraft"
 # CACHE_TTL = "3600"
+# DOCKER_AUTH 请用 `wrangler secret put DOCKER_AUTH` 注入，不要写在这个文件里
 # BLOB_REDIRECT = "1"
 # HOME_PAGE_URL = "https://kuwinet.github.io/d-proxy"
 # PREFIX = ""
