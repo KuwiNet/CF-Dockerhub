@@ -1,108 +1,119 @@
-# Docker 镜像代理
+# CF-Dockerhub · Docker / OCI 镜像仓库代理
 
-## 简介
+基于 Cloudflare Workers 的镜像仓库反向代理：国内直接拉取 Docker Hub / GHCR / Quay / GCR / NVCR 等仓库的镜像，同时支持多仓库路由、首页伪装与健康检查。
 
-这是一个基于 Cloudflare Workers 的 Docker 镜像代理服务，旨在帮助用户加速访问 Docker Hub 及其他容器镜像仓库，同时提供一定的功能扩展和自定义选项。
+代码为 **module 语法** 单文件 Worker（`worker.js`），无需构建、无 npm 依赖。
 
-## 功能特点
+## 特性
 
-  * **多镜像源支持** ：支持路由到多个镜像源，包括 Quay.io、GCR.io、k8s.gcr.io、registry.k8s.io、ghcr.io、docker.cloudsmith.io 和 nvcr.io 等，用户可通过主机名快速切换目标仓库。
-  * **自定义首页伪装** ：可将首页伪装成 nginx 默认页面或加载指定的外部页面，如 Docker Hub 镜像搜索界面，有效屏蔽爬虫访问。
-  * **请求处理优化** ：对包含特殊字符（如 %2F 和 %3A）的请求进行处理，确保请求路径正确性；修改 /v2/ 请求路径，提升请求效率。
-  * **认证与重定向处理** ：处理 Docker Registry 认证请求，修改 Www-Authenticate 头信息；对重定向请求进行特殊处理，保障用户访问流畅性。
-  * **缓存与性能优化** ：设置合理的缓存时间，减少重复请求，提高服务性能。
+- **多仓库支持**：`docker.io`（默认）、`quay.io`、`gcr.io`、`registry.k8s.io`、`ghcr.io`、`nvcr.io`、`docker.cloudsmith.io`；可通过子域名、`?hubhost=` 参数或 `ROUTES` 环境变量扩展。
+- **认证链路完整**：401 挑战（`Www-Authenticate`）里的 `realm` 会被改写回本 Worker，token 请求再按 `realm` 转发到上游真正的认证服务（`auth.docker.io` / `ghcr.io` / `quay.io/v2/auth` …）。私有仓库、`docker login` 均可用。
+- **断点续传**：透传 `Range` / `If-None-Match`，blob 支持 `206 Partial Content`，断线重摇不会再从头下载。
+- **大层流式转发**：响应体直接流式返回，不在 Worker 内存里落地；可选 `BLOB_REDIRECT=1` 把上游 307 原样回给客户端，省掉 Worker 流量。
+- **首页伪装 / 搜索页**：`URL=nginx` 返回 nginx 默认页，`URL302` 直接跳转，默认加载镜像搜索页；Cookie、CSP、Set-Cookie 等敏感头会被清理。
+- **可观测**：`/_health` 返回版本与当前上游；错误统一返回 Registry v2 规范的 JSON。
 
-## 使用方法
+## 部署
 
-### 部署到 Cloudflare Workers
+### 方式一：Wrangler（推荐）
 
-  1. 将代码部署到你的 Cloudflare Workers 环境中。
-  2. 在 Worker 中设置相关环境变量（如 UA、URL 等），以满足个性化需求。
+```bash
+npm i -g wrangler
+wrangler login
+wrangler deploy          # 读取仓库里的 wrangler.toml
+```
 
-### 访问代理服务
+绑定自定义域名：在 `wrangler.toml` 里取消 `routes` 注释，或在 Cloudflare 控制台
+`Workers & Pages → 你的 Worker → Settings → Domains & Routes` 里添加 Custom Domain。
 
-通过配置好的 Worker 域名访问 Docker 镜像资源，例如：<https://your-worker-domain.com/v2/library/nginx/manifests/latest> 。
+### 方式二：控制台粘贴
 
-### 自定义配置（可选）
+`Workers & Pages → Create → Worker`，把 `worker.js` 全文粘贴进编辑器，`Deploy`。
 
-  * 若要修改屏蔽爬虫的 UA 列表，可在代码中调整 `屏蔽爬虫UA` 数组，或通过设置环境变量 UA 来动态扩展列表。
-  * 如需自定义首页内容，可修改 `nginx()` 函数返回的 HTML 内容，或通过设置环境变量 URL 指向其他页面。
+> 注意：**不要再把域名做成指向源站的 DNS 记录**。Custom Domain 由 Cloudflare 自己托管证书；
+> 如果 DNS 记录指向自有服务器而源站证书无效，会出现 `Error 526: Invalid SSL certificate`，表现就是拉不动镜像。
 
-## 环境变量说明
+## 环境变量
 
-  * **UA** ：用于补充屏蔽爬虫的 UA 列表，多个 UA 之间用逗号分隔。
-  * **URL** ：指定首页要加载的外部页面 URL，若设置为 “nginx”，则首页显示 nginx 伪装页；若设置其他有效 URL，则加载对应页面。
-  * **URL302** ：用于设置首页的临时重定向目标地址，当有值时，访问首页会重定向到该地址。
-    
-   修改 `worker.js` 中下列代码中`https://kuwinet.github.io/d-proxy` 配置 Docker 镜像搜索页面：
-   ```bash
-   const response = await fetch('https://kuwinet.github.io/d-proxy'); // 替换为实际的外部网页 URL
-   ```
+| 变量 | 说明 | 示例 |
+| --- | --- | --- |
+| `ROUTES` | 扩展/覆盖子域名到上游的映射（JSON） | `{"myreg":"registry.example.com"}` |
+| `UA` | 追加屏蔽的爬虫 UA，逗号分隔 | `netcraft,somebot` |
+| `URL` | 首页行为：`nginx` 返回伪装页；其他值则反代该地址 | `nginx` |
+| `URL302` | 首页 302 跳转地址，优先级高于 `URL` | `https://example.com` |
+| `HOME_PAGE_URL` | 首页展示的镜像搜索页，默认 `https://kuwinet.github.io/d-proxy` | |
+| `CACHE_TTL` | manifest/blob 的 `Cache-Control: max-age`（秒），默认沿用上游 | `3600` |
+| `BLOB_REDIRECT` | `1` 时 blob 307 直接交给客户端，Worker 不中转大流量 | `1` |
+| `AUTH_HOSTS` | 追加允许的 token 端点主机，逗号分隔 | `auth.example.com` |
+| `PREFIX` | 路由前缀，默认空 | `/docker` |
 
-## 注意事项
+## 客户端用法
 
-  1. 本项目依赖 Cloudflare Workers 环境运行，需先注册并配置好 Cloudflare 账号及相关设置。
-  2. 在使用过程中，请确保遵守各镜像源的服务条款和使用政策，合理使用代理服务。
-  3. 若遇到请求失败或其他问题，可查看 Cloudflare Workers 的日志信息，根据报错提示进行排查和解决。
+```bash
+# 直接用
+docker pull docker.example.com/library/nginx:latest
+docker pull docker.example.com/snowdreamtech/frpc:latest
 
-## 如何使用
+# 多仓库：子域名方式（DNS 里把 ghcr.example.com 也指到同一个 Worker）
+docker pull ghcr.example.com/stefanprodan/podinfo:6.4.0
+# 或参数方式
+docker pull docker.example.com/stefanprodan/podinfo:6.4.0?hubhost=ghcr.io
+```
 
-### 步骤一：注册与登录 Cloudflare
+全局镜像加速（Linux）：
 
-  1. 访问 [Cloudflare 官网](https://www.cloudflare.com/) 并注册账号。
-  2. 登录后，添加你的域名并完成相关配置。
+```bash
+sudo mkdir -p /etc/docker
+sudo tee /etc/docker/daemon.json <<-'EOF'
+{
+  "registry-mirrors": ["https://docker.example.com"]
+}
+EOF
+sudo systemctl daemon-reload && sudo systemctl restart docker
+```
 
-### 步骤二：创建 Cloudflare Worker
+containerd（`/etc/containerd/config.toml`）：
 
-  1. 在 Cloudflare 仪表盘中，点击 “Workers” 选项。
-  2. 点击 “Create a Worker” 按钮，进入代码编辑界面。
+```toml
+[plugins."io.containerd.grpc.v1.cri".registry.mirrors]
+  [plugins."io.containerd.grpc.v1.cri".registry.mirrors."docker.io"]
+    endpoint = ["https://docker.example.com"]
+```
 
-### 步骤三：部署代码
+## 自检
 
-  1. 将上述提供的完整代码粘贴到 Cloudflare Worker 的代码编辑器中。
-  2. 点击 “Save and Continue” 保存代码。
+```bash
+curl -sI https://docker.example.com/_health            # 200 + JSON
+curl -s  https://docker.example.com/v2/                # 401 + Www-Authenticate: Bearer realm=".../_token?realm=..."
+```
 
-### 步骤四：配置环境变量（可选）
+`/v2/` 返回 401 且 `realm` 指向本域名，说明认证链路是通的（401 是 Registry v2 规范要求的正常响应，
+不是故障）。
 
-  1. 在 Worker 的 “Settings” 页面中，找到 “Variables” 部分。
-  2. 添加你需要的环境变量，如 UA、URL 或 URL302。
+`test/smoke.py` 是完整的拉取自检脚本（无第三方依赖）：
 
-### 步骤五：发布 Worker
+```bash
+python3 test/smoke.py https://docker.example.com
+python3 test/smoke.py https://docker.example.com --e2e     # 真实下载并校验 digest
+```
 
-  1. 在代码编辑器页面，点击 “Deploy” 按钮。
-  2. 选择 “Deploy to production” 将 Worker 发布到生产环境。
+## 常见问题
 
-### 步骤六：配置域名解析（可选）
+- **`Error 526: Invalid SSL certificate`**：域名没有由 Worker 提供，Cloudflare 回源到了证书无效的服务器。
+  检查 `Domains & Routes` 是否还绑着这个域名，以及是否存在冲突的 DNS 记录。
+- **`429 Too Many Requests`**：Docker Hub 匿名拉取有速率限制，登录后可提高额度；Worker 会透传 `Authorization`，
+  客户端 `docker login` 后即可走账号额度。
+- **拉取大镜像超时**：把 `BLOB_REDIRECT` 设为 `1`，让客户端直连 CDN，Worker 只负责鉴权与 manifest。
+- **私有仓库 401 循环**：确认 `AUTH_HOSTS`/`ROUTES` 覆盖了该仓库的认证主机（例如自建 Harbor 需要在 `ROUTES`
+  里加映射，并把其 token 主机加入 `AUTH_HOSTS`）。
+- **`docker search` 不可用**：`/v1/search` 是 Docker Hub 早已下线的旧 Web API，代理已按规范转发，
+  但上游现在直接返回 404，这是上游行为，不是代理故障；`docker pull` 不受影响。
 
-  1. 在 Cloudflare 仪表盘中，进入 “DNS” 页面。
-  2. 添加一条 A 记录或 CNAME 记录，将你的自定义域名指向 Cloudflare 分配的 Worker URL。
+## 版本
 
-### 步骤七：使用代理服务
+- `2.1.0` — 认证端点通用化、去掉 %3A 改写、重定向内部跟随、首页与健康检查、配置全部环境变量化。
+- `1.0` — 初版（docker-proxy 模板）。
 
-  1. 使用 Docker 客户端或任何支持 Docker Registry API 的工具访问你的代理服务。
-  2. 示例命令：
-     * 搜索并拉取镜像：
-       ```bash
-       docker search https://docker.arelay.cn/library/nginx
-       ```
-     * 拉取镜像：
+## 许可
 
-       ```bash
-       docker pull docker.arelay.cn/library/nginx:latest
-       ```
-  3.一键设置镜像加速：修改文件 /etc/docker/daemon.json（如果不存在则创建）
-  
-       sudo mkdir -p /etc/docker
-       sudo tee /etc/docker/daemon.json <<-'EOF'
-       {
-         "registry-mirrors": ["docker.arelay.cn"]
-       }
-       EOF
-       sudo systemctl daemon-reload
-       sudo systemctl restart docker
-
-
-### 步骤八：监控与维护
-
-  1. 在 Cloudflare 仪表盘中，查看 Worker 的运行状态和统计信息。
-  2. 定期检查日志，及时处理可能出现的错误或性能问题。
+MIT，见 [LICENSE](LICENSE)。

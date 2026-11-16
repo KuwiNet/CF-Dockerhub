@@ -1,0 +1,23 @@
+name = "cf-dockerhub"
+main = "worker.js"
+compatibility_date = "2024-11-01"
+
+# 自定义域名（在 Cloudflare 控制台加 Custom Domain，或用下面的 routes）
+# [[routes]]
+# pattern = "docker.example.com/*"
+# zone_name = "example.com"
+
+[observability]
+enabled = true
+
+[vars]
+# 见 README 的环境变量表，按需取消注释
+# URL = "nginx"
+# URL302 = "https://example.com"
+# UA = "netcraft"
+# CACHE_TTL = "3600"
+# BLOB_REDIRECT = "1"
+# HOME_PAGE_URL = "https://kuwinet.github.io/d-proxy"
+# PREFIX = ""
+# AUTH_HOSTS = "auth.docker.io"
+# ROUTES = '{"myreg":"registry.example.com"}'
