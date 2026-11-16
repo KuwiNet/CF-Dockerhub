@@ -17,13 +17,15 @@
  *   URL            首页行为："nginx" 返回伪装页；其他值则反代该地址
  *   URL302         首页 302 跳转地址（优先级高于 URL）
  *   HOME_PAGE_URL  首页要展示的镜像搜索页地址（默认 kuwinet.github.io/d-proxy）
- *   CACHE_TTL      manifest/blob 的 Cache-Control max-age（秒），默认沿用上游
+ *   CACHE_TTL      manifest/blob 的边缘缓存秒数（0 = 关闭）；只有匿名请求（无 Authorization，或匿名 token 无 sub）才缓存
  *   BLOB_REDIRECT  设为 1 时，blob 重定向原样返回 307 给客户端（不经过 Worker 流量）
  *   AUTH_HOSTS     追加允许作为 token 端点的主机，逗号分隔
+ *   DOCKER_AUTH    上游 Docker Hub 账号，格式 user:password（或 user:PAT），匿名请求时用它换 token，
+ *                  解决 Docker Hub 按出口 IP 计的 100 次/6 小时匿名限流（429 TOOMANYREQUESTS）
  *   PREFIX         路由前缀，默认空；例如挂在 example.com/docker/* 时设为 /docker
  */
 
-const VERSION = '2.1.0'
+const VERSION = '2.2.0'
 
 /** 默认上游路由表：子域名首段 -> 上游仓库主机 */
 const DEFAULT_ROUTES = {
@@ -44,6 +46,9 @@ const DEFAULT_ROUTES = {
 
 const DEFAULT_REGISTRY = 'registry-1.docker.io'
 const DEFAULT_HOME_PAGE_URL = 'https://kuwinet.github.io/d-proxy'
+
+/** DOCKER_AUTH 默认作用的主机（Docker Hub 的 token 端点） */
+const DEFAULT_DOCKER_AUTH_HOSTS = ['auth.docker.io', 'auth.docker.com']
 
 /** 额外允许的 token 端点（route 里的主机本身也会自动加入白名单） */
 const BASE_AUTH_HOSTS = [
@@ -107,6 +112,21 @@ function splitList(value) {
 		.filter(Boolean)
 }
 
+/** 把 user:password 编成 Basic 认证头；已经是 base64 的直接用 */
+function normalizeDockerAuth(value) {
+	if (!value) return ''
+	const raw = String(value).trim().replace(/^basic\s+/i, '')
+	if (!raw.includes(':')) return 'Basic ' + raw
+	try {
+		return 'Basic ' + btoa(raw)
+	} catch (err) {
+		const bytes = new TextEncoder().encode(raw)
+		let bin = ''
+		for (const b of bytes) bin += String.fromCharCode(b)
+		return 'Basic ' + btoa(bin)
+	}
+}
+
 /** 读取环境变量配置（每次请求计算，不使用模块级可变状态） */
 function loadConfig(env) {
 	const routes = Object.assign({}, DEFAULT_ROUTES)
@@ -134,6 +154,8 @@ function loadConfig(env) {
 		cacheTtl: Number(env && env.CACHE_TTL) > 0 ? Number(env.CACHE_TTL) : 0,
 		blobRedirect: String((env && env.BLOB_REDIRECT) || '') === '1',
 		prefix: (env && env.PREFIX) || '',
+		dockerAuth: normalizeDockerAuth(env && env.DOCKER_AUTH),
+		dockerAuthHosts: new Set(DEFAULT_DOCKER_AUTH_HOSTS.concat(splitList(env && env.DOCKER_AUTH_HOSTS).map((s) => s.toLowerCase()))),
 	}
 }
 
@@ -214,6 +236,34 @@ function normalizeDockerHubPath(pathname) {
 	return '/v2/library/' + repo + '/' + m[2] + '/' + m[3]
 }
 
+/** 判断请求是否匿名：无 Authorization，或 Bearer token 的 sub 为空（Docker Hub 匿名 token 就是这样）。
+ *  带账号的 token 一律不缓存，避免私有镜像被别的请求命中缓存。 */
+function isAnonymousRequest(request) {
+	const auth = request.headers.get('authorization')
+	if (!auth) return true
+	const m = /^bearer\s+(.+)$/i.exec(auth.trim())
+	if (!m) return false
+	const parts = m[1].split('.')
+	if (parts.length < 2) return false
+	try {
+		const payload = parts[1].replace(/-/g, '+').replace(/_/g, '/')
+		const padded = payload + '='.repeat((4 - (payload.length % 4)) % 4)
+		const json = JSON.parse(atob(padded))
+		return !json || String(json.sub || '') === ''
+	} catch (err) {
+		return false
+	}
+}
+
+/** 边缘缓存 key：去掉 hubhost / ns 参数，避免同一资源被拆成多份缓存 */
+function cacheKeyUrl(url) {
+	const u = new URL(url.href)
+	u.searchParams.delete('hubhost')
+	u.searchParams.delete('ns')
+	u.hash = ''
+	return u.href
+}
+
 /** 根据路径判断资源类型，用于缓存策略 */
 function resourceKind(pathname) {
 	if (/\/manifests\//.test(pathname)) return 'manifest'
@@ -268,7 +318,7 @@ function resolveUpstream(url, cfg) {
 }
 
 /** 代理 registry 请求 */
-async function handleRegistry(request, url, cfg) {
+async function handleRegistry(request, url, cfg, ctx) {
 	const upstreamHost = resolveUpstream(url, cfg)
 	if (!upstreamHost) {
 		return jsonRes({ errors: [{ code: 'BAD_REQUEST', message: '非法的 hubhost / ns 参数' }] }, 400)
@@ -284,6 +334,23 @@ async function handleRegistry(request, url, cfg) {
 	target.searchParams.delete('ns')
 	if (upstreamHost === DEFAULT_REGISTRY) {
 		target.pathname = normalizeDockerHubPath(target.pathname)
+	}
+
+	// 匿名 GET 的 manifest / blob 走边缘缓存：既省回源流量，也少消耗上游拉取额度
+	const kind = resourceKind(target.pathname)
+	const canCache = cfg.cacheTtl > 0 && request.method === 'GET'
+		&& (kind === 'manifest' || kind === 'blob')
+		&& isAnonymousRequest(request)
+		&& typeof caches !== 'undefined' && caches.default
+	let cacheKey = null
+	if (canCache) {
+		cacheKey = new Request(cacheKeyUrl(url), { method: 'GET' })
+		const hit = await caches.default.match(cacheKey)
+		if (hit) {
+			const cachedHeaders = new Headers(hit.headers)
+			cachedHeaders.set('x-proxy-cache', 'HIT')
+			return new Response(hit.body, { status: hit.status, headers: cachedHeaders })
+		}
 	}
 
 	const init = {
@@ -320,7 +387,11 @@ async function handleRegistry(request, url, cfg) {
 		}
 	}
 
-	return finalize(upstreamRes, upstreamRes.headers, url, cfg, target.pathname)
+	const response = finalize(upstreamRes, upstreamRes.headers, url, cfg, target.pathname)
+	if (cacheKey && response.status === 200 && ctx && ctx.waitUntil) {
+		ctx.waitUntil(caches.default.put(cacheKey, response.clone()))
+	}
+	return response
 }
 
 /** 组装最终响应：清理逐跳头、补 CORS / 缓存，流式返回 */
@@ -377,9 +448,15 @@ async function handleToken(request, url, cfg) {
 	params.delete('ns')
 	target.search = params.toString()
 
+	const upstreamHeaders = buildUpstreamHeaders(request)
+	// 匿名客户端 + 配了 DOCKER_AUTH：用 Worker 自己的账号换 token，规避 Docker Hub 匿名 IP 限流
+	if (cfg.dockerAuth && !upstreamHeaders.has('authorization') && cfg.dockerAuthHosts.has(target.hostname.toLowerCase())) {
+		upstreamHeaders.set('authorization', cfg.dockerAuth)
+	}
+
 	const res = await fetchFollow(target, {
 		method: request.method,
-		headers: buildUpstreamHeaders(request),
+		headers: upstreamHeaders,
 		body: request.method === 'GET' || request.method === 'HEAD' ? undefined : request.body,
 	}, { follow: true })
 
@@ -502,7 +579,7 @@ export default {
 		// registry 请求
 		if (isRegistryPath(pathname)) {
 			try {
-				return await handleRegistry(request, url, cfg)
+				return await handleRegistry(request, url, cfg, ctx)
 			} catch (err) {
 				console.error('registry 代理失败:', err && err.stack)
 				return jsonRes({ errors: [{ code: 'UNKNOWN', message: '上游请求失败: ' + (err && err.message) }] }, 502)
