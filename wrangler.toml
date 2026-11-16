@@ -29,4 +29,4 @@ enabled = true
 # AUTH_HOSTS = "auth.docker.io"
 # ROUTES = '{"myreg":"registry.example.com"}'
 # PUBLIC_HOST：前面接了 EdgeOne 等 CDN 时填对外域名，realm 才会指回对外域名
-# PUBLIC_HOST = "docker.arelay.cn"
+PUBLIC_HOST = "docker.arelay.cn"
