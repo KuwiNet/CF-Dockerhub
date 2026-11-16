@@ -2,17 +2,75 @@
  * CF-Dockerhub 部署入口（2026-11-16）
  *
  * 为什么多一层入口：worker.js 的 registry 代理逻辑不动，只在这里额外接住
- *   /search      —— 首页搜索框跳转的路径（原来会掉进 handleLanding 直接 404）
- *   /v1/search   —— 老版 docker search 客户端用的路径（上游 registry 早已下线，必 404）
- * 搜索改调 hub.docker.com/v2/search/repositories/（匿名可访问、字段稳定、带分页）。
+ *   /search        —— 首页搜索框跳转的路径（原来会掉进 handleLanding 直接 404）
+ *   /search/_debug —— 搜索链路诊断（返回每个上游的 status/耗时/片段）
+ *   /v1/search     —— 老版 docker search 客户端用的路径（上游 registry 早已下线，必 404）
+ *
+ * 上游说明：registry 的 /v1/search 已下线，能用的只有 hub.docker.com 的 Web API。
+ * 现实问题是 Cloudflare 出口 IP 被 hub.docker.com 限流（Worker 里固定 429），
+ * 所以这里做了三件事：换浏览器 UA → 多上游依次兜底 → 边缘缓存缓存住成功结果。
  *
  * wrangler.toml 的 main 指向本文件；其余请求原样交给 worker.js。
  */
 
 import worker from './worker.js'
 
-const SEARCH_UPSTREAM = 'https://hub.docker.com/v2/search/repositories/'
 const SEARCH_PAGE_SIZE = 25
+const SEARCH_CACHE_TTL = 600
+const SEARCH_UA =
+	'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+
+/** 上游候选：按顺序尝试，前一个失败（429/5xx）就换下一个 */
+const UPSTREAMS = [
+	{
+		name: 'v2',
+		url: (q, page) =>
+			'https://hub.docker.com/v2/search/repositories/?query=' +
+			encodeURIComponent(q) +
+			'&page=' + page + '&page_size=' + SEARCH_PAGE_SIZE,
+		json: true,
+		parse: (d) => ({
+			total: Number(d.count || 0),
+			items: (d.results || []).map((r) => ({
+				repo: r.repo_name || '',
+				desc: r.short_description || '',
+				stars: r.star_count,
+				pulls: r.pull_count,
+				official: !!r.is_official,
+			})),
+		}),
+	},
+	{
+		name: 'v4',
+		url: (q, page) =>
+			'https://hub.docker.com/api/search/v4/query?query=' +
+			encodeURIComponent(q) +
+			'&size=' + SEARCH_PAGE_SIZE + '&page=' + page,
+		json: true,
+		parse: (d) => ({
+			total: Number(d.total || 0),
+			items: (d.results || []).map((r) => ({
+				repo: r.name || r.slug || '',
+				desc: r.short_description || '',
+				stars: r.star_count,
+				pulls: r.pull_count,
+				official: !!r.is_official,
+			})),
+		}),
+	},
+	{
+		name: 'jina',
+		url: (q, page) =>
+			'https://r.jina.ai/https://hub.docker.com/v2/search/repositories/?query=' +
+			encodeURIComponent(q) +
+			'&page=' + page + '&page_size=' + SEARCH_PAGE_SIZE,
+		json: false,
+		parse: (text) => {
+			const raw = text.slice(text.indexOf('Markdown Content:') + 17).trim()
+			return UPSTREAMS[0].parse(JSON.parse(raw))
+		},
+	},
+]
 
 /** 对外域名：优先 PUBLIC_HOST（前置 CDN 时用），否则用当前请求的 origin */
 function baseOf(url, env) {
@@ -38,56 +96,64 @@ function esc(value) {
 		.replace(/"/g, '&quot;')
 }
 
-async function fetchSearch(q, page) {
-	const target = new URL(SEARCH_UPSTREAM)
-	target.searchParams.set('query', q)
-	target.searchParams.set('page', String(page))
-	target.searchParams.set('page_size', String(SEARCH_PAGE_SIZE))
-	const res = await fetch(target.href, {
-		headers: { 'user-agent': 'cf-dockerhub-search', accept: 'application/json' },
-		cf: { cacheTtl: 300, cacheEverything: true },
-	})
-	if (!res.ok) throw new Error('upstream ' + res.status)
-	return await res.json()
+function headers() {
+	return {
+		'user-agent': SEARCH_UA,
+		accept: 'application/json',
+		'referer': 'https://hub.docker.com/search',
+		'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
+	}
 }
 
-function resultRows(results, base) {
-	if (!results.length) return '<p class="empty">没有匹配的镜像，换个关键词试试。</p>'
-	return results
+/** 依次尝试上游，返回 { data, from, attempts } */
+async function querySearch(q, page) {
+	const attempts = []
+	for (const up of UPSTREAMS) {
+		const started = Date.now()
+		const url = up.url(q, page)
+		try {
+			const res = await fetch(url, { headers: headers(), cf: { cacheTtl: 300, cacheEverything: true } })
+			const text = await res.text()
+			attempts.push({ name: up.name, status: res.status, ms: Date.now() - started, head: text.slice(0, 120) })
+			if (!res.ok) continue
+			const data = up.json ? up.parse(JSON.parse(text)) : up.parse(text)
+			if (!data || !data.items) continue
+			return { data, from: up.name, attempts }
+		} catch (err) {
+			attempts.push({ name: up.name, status: 0, ms: Date.now() - started, error: (err && err.message) || 'unknown' })
+		}
+	}
+	return { data: null, from: '', attempts }
+}
+
+function resultRows(items, base) {
+	if (!items.length) return '<p class="empty">没有匹配的镜像，换个关键词试试。</p>'
+	return items
 		.map((r) => {
-			const repo = r.repo_name || ''
-			const official = !!r.is_official || /^library\//.test(repo)
-			const desc = r.short_description || '（无描述）'
+			const repo = r.repo || ''
+			const official = r.official || /^library\//.test(repo)
+			const desc = r.desc || '（无描述）'
 			const pull = 'docker pull ' + base.replace(/^https?:\/\//, '') + '/' + repo
 			const badge = official ? '<span class="badge">官方</span>' : ''
-			const stars = r.star_count == null ? '' : '<span class="meta">★ ' + esc(r.star_count) + '</span>'
-			const pulls = r.pull_count == null ? '' : '<span class="meta">↓ ' + esc(r.pull_count) + '</span>'
+			const stars = r.stars == null ? '' : '<span class="meta">★ ' + esc(r.stars) + '</span>'
+			const pulls = r.pulls == null ? '' : '<span class="meta">↓ ' + esc(r.pulls) + '</span>'
 			return (
-				'<div class="card"><div class="head"><a class="name" href="/?q=' +
-				encodeURIComponent(repo) +
-				'" rel="nofollow">' +
-				esc(repo) +
-				'</a>' +
-				badge +
-				stars +
-				pulls +
-				'</div><p class="desc">' +
-				esc(desc) +
-				'</p><div class="cmd"><code>' +
-				esc(pull) +
-				'</code><button class="copy" data-cmd="' +
-				esc(pull) +
-				'">复制</button></div></div>'
+				'<div class="card"><div class="head"><span class="name">' + esc(repo) + '</span>' + badge + stars + pulls +
+				'</div><p class="desc">' + esc(desc) + '</p><div class="cmd"><code>' + esc(pull) +
+				'</code><button class="copy" data-cmd="' + esc(pull) + '">复制</button></div></div>'
 			)
 		})
 		.join('')
 }
 
-function searchPage({ q, page, total, results, base, error }) {
+function searchPage({ q, page, total, items, base, error }) {
 	const pages = Math.max(1, Math.ceil((total || 0) / SEARCH_PAGE_SIZE))
 	const prev = page > 1 ? '<a href="/search?q=' + encodeURIComponent(q) + '&page=' + (page - 1) + '">← 上一页</a>' : '<span></span>'
 	const next = page < pages ? '<a href="/search?q=' + encodeURIComponent(q) + '&page=' + (page + 1) + '">下一页 →</a>' : '<span></span>'
-	const summary = error ? '<p class="empty">搜索上游暂时不可用：' + esc(error) + '</p>' : '<p class="summary">共 ' + esc(total) + ' 个结果 · 第 ' + esc(page) + ' / ' + esc(pages) + ' 页</p>'
+	const summary = error
+		? '<p class="empty">Docker Hub 搜索接口暂时不可用（' + esc(error) + '），可以直接按镜像名拉取：<code>docker pull ' +
+			esc(base.replace(/^https?:\/\//, '')) + '/&lt;镜像名&gt;</code></p>'
+		: '<p class="summary">共 ' + esc(total) + ' 个结果 · 第 ' + esc(page) + ' / ' + esc(pages) + ' 页</p>'
 	return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -108,11 +174,11 @@ input:focus{outline:none;border-color:#6e00aa;background:#fff;box-shadow:0 0 0 3
 .sbtn{position:absolute;right:8px;top:50%;transform:translateY(-50%);width:44px;height:44px;padding:0;border:none;border-radius:8px;background:#6e00aa;color:#fff;cursor:pointer;display:flex;justify-content:center;align-items:center;transition:all .2s ease}
 .sbtn:hover{background:#9f00f4;transform:translateY(-50%) scale(1.05)}
 .summary{color:rgba(255,255,255,.7);font-size:14px;margin-bottom:14px}
-.empty{color:rgba(255,255,255,.8);padding:18px;background:rgba(255,255,255,.06);border-radius:12px}
+.empty{color:rgba(255,255,255,.85);padding:16px 18px;background:rgba(255,255,255,.06);border-radius:12px;line-height:1.7;font-size:14px}
+.empty code{background:rgba(0,0,0,.25);padding:2px 6px;border-radius:6px;font-size:13px}
 .card{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:16px 18px;margin-bottom:12px}
 .head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px}
-.name{color:#fff;font-size:16px;font-weight:700;text-decoration:none;word-break:break-all}
-.name:hover{text-decoration:underline}
+.name{color:#fff;font-size:16px;font-weight:700;word-break:break-all}
 .badge{font-size:12px;padding:2px 8px;border-radius:6px;background:rgba(255,255,255,.18)}
 .meta{font-size:12px;color:rgba(255,255,255,.65)}
 .desc{color:rgba(255,255,255,.8);font-size:14px;line-height:1.5;margin-bottom:10px;word-break:break-word}
@@ -130,7 +196,7 @@ input:focus{outline:none;border-color:#6e00aa;background:#fff;box-shadow:0 0 0 3
 <h1>Docker 镜像搜索</h1>
 <form action="/search" method="get"><input type="text" name="q" value="${esc(q)}" placeholder="搜索镜像，如 nginx、mysql、redis" autofocus><button class="sbtn" type="submit" aria-label="搜索"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="M15.5 15.5 21 21"></path></svg></button></form>
 ${summary}
-${error ? '' : resultRows(results, base)}
+${error ? '' : resultRows(items, base)}
 <div class="pager">${prev}${next}</div>
 </div>
 <script>
@@ -147,46 +213,97 @@ document.querySelectorAll('.copy').forEach(function (btn) {
 </html>`
 }
 
-async function handleSearch(request, url, env, path) {
+/** 边缘缓存：成功结果缓存 10 分钟，缓解上游限流 */
+async function readCache(q, page) {
+	try {
+		const hit = await caches.default.match(cacheUrl(q, page))
+		if (!hit) return null
+		return await hit.json()
+	} catch (err) {
+		return null
+	}
+}
+
+function cacheUrl(q, page) {
+	return new Request('https://search-cache.internal/v1?q=' + encodeURIComponent(q) + '&p=' + page)
+}
+
+async function writeCache(q, page, payload, ctx) {
+	try {
+		const res = new Response(JSON.stringify(payload), {
+			headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=' + SEARCH_CACHE_TTL },
+		})
+		const put = caches.default.put(cacheUrl(q, page), res)
+		if (ctx && ctx.waitUntil) ctx.waitUntil(put)
+		else await put
+	} catch (err) {
+		/* 缓存失败不影响结果 */
+	}
+}
+
+async function handleSearch(request, url, env, ctx, path) {
 	const q = (url.searchParams.get('q') || '').trim()
 	const page = Math.max(1, Number(url.searchParams.get('page') || 1) || 1)
 	const base = baseOf(url, env)
 	const wantsJson = path === '/v1/search' || (request.headers.get('accept') || '').includes('application/json')
 
-	let data = null
-	let error = ''
-	try {
-		data = q ? await fetchSearch(q, page) : { count: 0, results: [] }
-	} catch (err) {
-		error = (err && err.message) || 'unknown'
+	// 诊断端点
+	if (path === '/search/_debug') {
+		const r = await querySearch(q || 'nginx', page)
+		return new Response(JSON.stringify({ q, page, from: r.from, attempts: r.attempts }, null, 2), {
+			status: r.data ? 200 : 502,
+			headers: { 'content-type': 'application/json; charset=utf-8' },
+		})
 	}
 
+	let payload = q ? await readCache(q, page) : null
+	let error = ''
+	if (!payload && q) {
+		const r = await querySearch(q, page)
+		if (r.data) {
+			payload = { total: r.data.total, items: r.data.items, from: r.from, at: new Date().toISOString() }
+			await writeCache(q, page, payload, ctx)
+		} else {
+			const last = r.attempts[r.attempts.length - 1] || {}
+			error = r.attempts.map((a) => a.name + ':' + (a.status || a.error)).join(' / ') || (last.error || '429')
+		}
+	}
+	if (!payload) payload = { total: 0, items: [] }
+	const cached = !!payload.at && !!q && !error
+
 	if (wantsJson) {
-		const results = ((data && data.results) || []).map((r) => ({
-			name: r.repo_name || '',
-			description: r.short_description || '',
-			star_count: r.star_count || 0,
-			is_official: !!r.is_official,
-			is_automated: false,
-		}))
 		return new Response(
-			JSON.stringify({ num_results: data ? data.count || results.length : 0, query: q, results }),
+			JSON.stringify({
+				num_results: payload.total || payload.items.length || 0,
+				query: q,
+				results: payload.items.map((r) => ({
+					name: r.repo,
+					description: r.desc,
+					star_count: r.stars || 0,
+					is_official: !!r.official,
+					is_automated: false,
+				})),
+			}),
 			{ status: error ? 502 : 200, headers: { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*' } }
 		)
 	}
 
-	return new Response(
-		searchPage({ q, page, total: (data && data.count) || 0, results: (data && data.results) || [], base, error }),
-		{ status: error ? 502 : 200, headers: { 'content-type': 'text/html; charset=UTF-8', 'cache-control': 'public, max-age=120' } }
-	)
+	return new Response(searchPage({ q, page, total: payload.total, items: payload.items, base, error }), {
+		status: 200,
+		headers: {
+			'content-type': 'text/html; charset=UTF-8',
+			'cache-control': 'public, max-age=120',
+			'x-search-source': (payload.from || 'none') + (cached ? ' (cache)' : ''),
+		},
+	})
 }
 
 export default {
 	async fetch(request, env, ctx) {
 		const url = new URL(request.url)
 		const path = routePath(url.pathname, env)
-		if (path === '/search' || path === '/v1/search') {
-			return handleSearch(request, url, env, path)
+		if (path === '/search' || path === '/search/_debug' || path === '/v1/search') {
+			return handleSearch(request, url, env, ctx, path)
 		}
 		return worker.fetch(request, env, ctx)
 	},
