@@ -131,7 +131,7 @@ function loadConfig(env) {
 		homeUrl: (env && env.URL) || '',
 		redirect302: (env && env.URL302) || '',
 		homePageUrl: (env && env.HOME_PAGE_URL) || DEFAULT_HOME_PAGE_URL,
-		cacheTtl: Number(env && env.CACHE_TTL) > 0 ? Number(env && env.CACHE_TTL) : 0,
+		cacheTtl: Number(env && env.CACHE_TTL) > 0 ? Number(env.CACHE_TTL) : 0,
 		blobRedirect: String((env && env.BLOB_REDIRECT) || '') === '1',
 		prefix: (env && env.PREFIX) || '',
 	}
@@ -164,7 +164,7 @@ function preflight() {
 	})
 }
 
-/** 取本源站地址（用亜把 realm 改写回本 Worker） */
+/** 取本源站地址（用于把 realm 改写回本 Worker） */
 function selfBase(url) {
 	return url.protocol + '//' + url.host
 }
@@ -180,7 +180,7 @@ function rewriteWwwAuthenticate(value, base, prefix) {
 			const u = new URL(realm)
 			originPath = u.origin + u.pathname + u.search
 		} catch (err) {
-			// 非结对地址，保持原样
+			// 非绝对地址，保持原样
 			return match
 		}
 		return 'realm="' + base + prefix + '/_token?realm=' + encodeURIComponent(originPath) + '"'
@@ -222,7 +222,7 @@ function resourceKind(pathname) {
 }
 
 /**
- * 内部跟随重定向：跳主机时丢弃 Authorization（避免把 token 泄漏给 CDN）。
+ * 内部跟随重定向：跨主机时丢弃 Authorization（避免把 token 泄漏给 CDN）。
  * 最多 5 跳。
  */
 async function fetchFollow(target, init, options = {}) {
@@ -355,7 +355,7 @@ async function handleToken(request, url, cfg) {
 	let target
 	if (realm) {
 		if (!/^https:\/\//i.test(realm)) {
-			return jsonRes({ errors: [{ code: 'BAD_REQUEST', message: 'realm 必须是 https 结对地址' }] }, 400)
+			return jsonRes({ errors: [{ code: 'BAD_REQUEST', message: 'realm 必须是 https 绝对地址' }] }, 400)
 		}
 		try {
 			target = new URL(realm)
