@@ -18,6 +18,8 @@ import worker from './worker.js'
 
 const SEARCH_PAGE_SIZE = 25
 const SEARCH_CACHE_TTL = 600
+// 单个上游最多等 6 秒：上游挂住时也不能让页面一直转圈（Workers 本身没有请求超时）
+const SEARCH_TRY_TIMEOUT = 6000
 const SEARCH_UA =
 	'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
 
@@ -113,7 +115,11 @@ async function querySearch(q, page) {
 		const started = Date.now()
 		const url = up.url(q, page)
 		try {
-			const res = await fetch(url, { headers: headers(), cf: { cacheTtl: 300, cacheEverything: true } })
+			const res = await fetch(url, {
+				headers: headers(),
+				signal: AbortSignal.timeout(SEARCH_TRY_TIMEOUT),
+				cf: { cacheTtl: 300, cacheEverything: true },
+			})
 			const text = await res.text()
 			attempts.push({ name: up.name, status: res.status, ms: Date.now() - started, head: text.slice(0, 120) })
 			if (!res.ok) continue
