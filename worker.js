@@ -23,9 +23,11 @@
  *   DOCKER_AUTH    上游 Docker Hub 账号，格式 user:password（或 user:PAT），匿名请求时用它换 token，
  *                  解决 Docker Hub 按出口 IP 计的 100 次/6 小时匿名限流（429 TOOMANYREQUESTS）
  *   PREFIX         路由前缀，默认空；例如挂在 example.com/docker/* 时设为 /docker
+ *   PUBLIC_HOST    对外域名。Worker 前面还有一层 CDN（如 EdgeOne）时，realm 必须写成对外域名，
+ *                  否则客户端会去连 CDN 后面的源站域名；例如 EdgeOne 回源 cf.example.com 时设 PUBLIC_HOST=docker.example.com
  */
 
-const VERSION = '2.2.0'
+const VERSION = '2.3.0'
 
 /** 默认上游路由表：子域名首段 -> 上游仓库主机 */
 const DEFAULT_ROUTES = {
@@ -151,9 +153,10 @@ function loadConfig(env) {
 		homeUrl: (env && env.URL) || '',
 		redirect302: (env && env.URL302) || '',
 		homePageUrl: (env && env.HOME_PAGE_URL) || DEFAULT_HOME_PAGE_URL,
-		cacheTtl: Number(env && env.CACHE_TTL) > 0 ? Number(env.CACHE_TTL) : 0,
+		cacheTtl: Number(env && env.CACHE_TTL) > 0 ? Number(env && env.CACHE_TTL) : 0,
 		blobRedirect: String((env && env.BLOB_REDIRECT) || '') === '1',
 		prefix: (env && env.PREFIX) || '',
+		publicHost: (env && env.PUBLIC_HOST) || '',
 		dockerAuth: normalizeDockerAuth(env && env.DOCKER_AUTH),
 		dockerAuthHosts: new Set(DEFAULT_DOCKER_AUTH_HOSTS.concat(splitList(env && env.DOCKER_AUTH_HOSTS).map((s) => s.toLowerCase()))),
 	}
@@ -187,7 +190,12 @@ function preflight() {
 }
 
 /** 取本源站地址（用于把 realm 改写回本 Worker） */
-function selfBase(url) {
+function selfBase(url, cfg) {
+	const publicHost = cfg && cfg.publicHost
+	if (publicHost) {
+		// 前面挂了 CDN / 反向代理时，realm 必须指向对外域名，否则客户端会去连源站域名
+		return /^https?:\/\//i.test(publicHost) ? publicHost.replace(/\/$/, '') : 'https://' + publicHost
+	}
 	return url.protocol + '//' + url.host
 }
 
@@ -367,7 +375,7 @@ async function handleRegistry(request, url, cfg, ctx) {
 		const challenge = upstreamRes.headers.get('www-authenticate')
 		if (challenge) {
 			const headers = new Headers(upstreamRes.headers)
-			headers.set('www-authenticate', rewriteWwwAuthenticate(challenge, selfBase(url), cfg.prefix))
+			headers.set('www-authenticate', rewriteWwwAuthenticate(challenge, selfBase(url, cfg), cfg.prefix))
 			return finalize(upstreamRes, headers, url, cfg, target.pathname)
 		}
 	}
@@ -551,6 +559,7 @@ export default {
 				status: 'ok',
 				version: VERSION,
 				upstream: resolveUpstream(url, cfg),
+				base: selfBase(url, cfg),
 				time: new Date().toISOString(),
 			})
 		}
