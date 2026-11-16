@@ -1,5 +1,7 @@
 name = "docker"
-main = "worker.js"
+# main 指向 index.js：它在最外层接住 /search 与 /v1/search（首页搜索框/镜像搜索），
+# 其余请求原样交给 worker.js（registry 代理逻辑不变）。wrangler 会自动打包两者。
+main = "index.js"
 compatibility_date = "2024-11-01"
 
 # name 必须与 Cloudflare 面板里的 Worker 服务名逐字符一致：
