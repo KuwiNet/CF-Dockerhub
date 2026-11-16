@@ -8,7 +8,8 @@
  *
  * 上游说明：registry 的 /v1/search 已下线，能用的只有 hub.docker.com 的 Web API。
  * 现实问题是 Cloudflare 出口 IP 被 hub.docker.com 限流（Worker 里固定 429），
- * 所以这里做了三件事：换浏览器 UA → 多上游依次兜底 → 边缘缓存缓存住成功结果。
+ * 所以这里做了三件事：换浏览器 UA → 多上游依次兜底 → 边缘缓存缓存住成功结果；
+ * 即使全部失败，页面依然给出“按名字直接拉取”的可用命令（搜索只是锦上添花）。
  *
  * wrangler.toml 的 main 指向本文件；其余请求原样交给 worker.js。
  */
@@ -126,6 +127,18 @@ async function querySearch(q, page) {
 	return { data: null, from: '', attempts }
 }
 
+function pullCard(q, base) {
+	if (!q) return ''
+	const name = base.replace(/^https?:\/\//, '')
+	const pull = 'docker pull ' + name + '/' + q
+	return (
+		'<div class="card direct"><div class="head"><span class="name">直接拉取「' + esc(q) + '」</span>' +
+		'<span class="badge">按名字拉</span></div>' +
+		'<div class="cmd"><code>' + esc(pull) + '</code><button class="copy" data-cmd="' + esc(pull) + '">复制</button></div>' +
+		'<p class="desc" style="margin:10px 0 0">搜索接口被 Docker Hub 限流时也能用：把镜像名（含命名空间，如 <code>afrp/afrp</code>）填进地址即可。</p></div>'
+	)
+}
+
 function resultRows(items, base) {
 	if (!items.length) return '<p class="empty">没有匹配的镜像，换个关键词试试。</p>'
 	return items
@@ -151,8 +164,8 @@ function searchPage({ q, page, total, items, base, error }) {
 	const prev = page > 1 ? '<a href="/search?q=' + encodeURIComponent(q) + '&page=' + (page - 1) + '">← 上一页</a>' : '<span></span>'
 	const next = page < pages ? '<a href="/search?q=' + encodeURIComponent(q) + '&page=' + (page + 1) + '">下一页 →</a>' : '<span></span>'
 	const summary = error
-		? '<p class="empty">Docker Hub 搜索接口暂时不可用（' + esc(error) + '），可以直接按镜像名拉取：<code>docker pull ' +
-			esc(base.replace(/^https?:\/\//, '')) + '/&lt;镜像名&gt;</code></p>'
+		? '<p class="empty">Docker Hub 的搜索接口当前限流（' + esc(error) + '），可以先按上面那条命令直接拉取；' +
+			'需要浏览搜索结果时，可打开 <a class="outlink" href="https://hub.docker.com/search?q=' + encodeURIComponent(q) + '" target="_blank" rel="noreferrer">Docker Hub 官方搜索</a>。</p>'
 		: '<p class="summary">共 ' + esc(total) + ' 个结果 · 第 ' + esc(page) + ' / ' + esc(pages) + ' 页</p>'
 	return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -177,11 +190,14 @@ input:focus{outline:none;border-color:#6e00aa;background:#fff;box-shadow:0 0 0 3
 .empty{color:rgba(255,255,255,.85);padding:16px 18px;background:rgba(255,255,255,.06);border-radius:12px;line-height:1.7;font-size:14px}
 .empty code{background:rgba(0,0,0,.25);padding:2px 6px;border-radius:6px;font-size:13px}
 .card{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:16px 18px;margin-bottom:12px}
+.direct{border-color:rgba(255,255,255,.28);background:rgba(255,255,255,.09);margin-bottom:18px}
+.outlink{color:#ffd98a}
 .head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px}
 .name{color:#fff;font-size:16px;font-weight:700;word-break:break-all}
 .badge{font-size:12px;padding:2px 8px;border-radius:6px;background:rgba(255,255,255,.18)}
 .meta{font-size:12px;color:rgba(255,255,255,.65)}
 .desc{color:rgba(255,255,255,.8);font-size:14px;line-height:1.5;margin-bottom:10px;word-break:break-word}
+.desc code{background:rgba(0,0,0,.25);padding:1px 5px;border-radius:5px;font-size:13px}
 .cmd{display:flex;align-items:center;gap:10px;background:rgba(0,0,0,.22);border-radius:8px;padding:10px 12px}
 .cmd code{flex:1;font-size:13px;color:#e7d7ff;word-break:break-all}
 .copy{border:none;border-radius:6px;background:rgba(255,255,255,.16);color:#fff;font-size:12px;padding:6px 10px;cursor:pointer}
@@ -195,6 +211,7 @@ input:focus{outline:none;border-color:#6e00aa;background:#fff;box-shadow:0 0 0 3
 <a class="back" href="/">← 返回镜像加速首页</a>
 <h1>Docker 镜像搜索</h1>
 <form action="/search" method="get"><input type="text" name="q" value="${esc(q)}" placeholder="搜索镜像，如 nginx、mysql、redis" autofocus><button class="sbtn" type="submit" aria-label="搜索"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="M15.5 15.5 21 21"></path></svg></button></form>
+${pullCard(q, base)}
 ${summary}
 ${error ? '' : resultRows(items, base)}
 <div class="pager">${prev}${next}</div>
