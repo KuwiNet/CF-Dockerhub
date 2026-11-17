@@ -6,7 +6,7 @@
  *      /_token?realm=... ，因此 ghcr / gcr / quay / nvcr / k8s 等仓库的 token 也能正确转发。
  *   2. 去掉脆弱的 %3A / %2F 字符串替换：不再改写 query，也不会把 sha256 摘要改坏。
  *   3. registry 路径不再受 User-Agent 影响（浏览器访问 /v2/... 同样按 registry 处理）。
- *   4. 重定向（blob 307 到 CDN）在 Worker 内部跟随，且跨主机时自动丢弃 Authorization；
+ *   4. 重定向（blob 307 到 CDN）在 Worker 内部跟随，且跳主机时自动丢弃 Authorization；
  *      可选 BLOB_REDIRECT=1 直接把 307 返回给客户端。
  *   5. 上游主机、屏蔽 UA、首页行为全部走环境变量，不再依赖模块级可变状态（避免并发串号）。
  *   6. 增加 /_health 健康检查、OPTIONS 预检、CORS 头、缓存策略与结构化错误。
@@ -55,7 +55,7 @@ const DEFAULT_REGISTRY = 'registry-1.docker.io'
 const DEFAULT_HOME_PAGE_URL = 'https://kuwinet.github.io/d-proxy'
 
 /** 静态资源版本：jsDelivr 固定 commit（换版本只改这一行） */
-const ASSET_COMMIT = 'eaf275f9e1af10a53f8c24c8dcd8c73ee335132d'
+const ASSET_COMMIT = '17676bbc47c7c56e637b268203aeae88b797632f'
 const ASSET_CDN = 'https://cdn.jsdelivr.net/gh/KuwiNet/kuwinet.github.io@' + ASSET_COMMIT
 
 /** 内置首页（原 d-proxy/index.html），资源引用统一走 ASSET_CDN */
@@ -399,7 +399,7 @@ function resourceKind(pathname) {
 }
 
 /**
- * 内部跟随重定向：跨主机时丢弃 Authorization（避免把 token 泄漏给 CDN）。
+ * 内部跟随重定向：跟主机时丢弃 Authorization（避免把 token 泄漏给 CDN）。
  * 最多 5 跳。
  */
 async function fetchFollow(target, init, options = {}) {
@@ -457,7 +457,6 @@ async function handleRegistry(request, url, cfg, ctx) {
     target.hostname = colon > 0 ? upstreamHost.slice(0, colon) : upstreamHost
     target.port = colon > 0 ? upstreamHost.slice(colon + 1) : ''
     target.hash = ''
-
     target.searchParams.delete('hubhost')
     target.searchParams.delete('ns')
     if (upstreamHost === DEFAULT_REGISTRY) {
