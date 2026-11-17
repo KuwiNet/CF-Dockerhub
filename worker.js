@@ -11,7 +11,9 @@
  *   5. 上游主机、屏蔽 UA、首页行为全部走环境变量，不再依赖模块级可变状态（避免并发串号）。
  *   6. 增加 /_health 健康检查、OPTIONS 预检、CORS 头、缓存策略与结构化错误。
  *   7. 首页 HTML 内置在 Worker 里（HOME_HTML），不再从 github.io 反代；
- *      资源（css / js / 字体 / logo）走 jsDelivr 固定 commit。设 BUILTIN_HOME=0 可回退。
+ *      资源（css / js / 字体 / logo）走 jsDelivr；commit 号集中在 ASSET_COMMIT 一个常量。
+ *      设 BUILTIN_HOME=0 可回退。
+ *   8. 导航高亮块改为纯 CSS（见 css/navbar.css 的 li.active>a 规则），不再靠 JS 测量定位。
  *
  * 环境变量（Cloudflare Workers → Settings → Variables）：
  *   ROUTES         JSON，覆盖/扩展子域名到上游仓库的映射，例如 {"myreg":"registry.example.com"}
@@ -52,20 +54,24 @@ const DEFAULT_ROUTES = {
 const DEFAULT_REGISTRY = 'registry-1.docker.io'
 const DEFAULT_HOME_PAGE_URL = 'https://kuwinet.github.io/d-proxy'
 
-/** 内置首页（原 d-proxy/index.html），资源引用已改为 jsDelivr 固定 commit，不再中转 github.io */
+/** 静态资源版本：jsDelivr 固定 commit（换版本只改这一行） */
+const ASSET_COMMIT = 'c5d58a331e812ef9064931f5b9f951d690284c50'
+const ASSET_CDN = 'https://cdn.jsdelivr.net/gh/KuwiNet/kuwinet.github.io@' + ASSET_COMMIT
+
+/** 内置首页（原 d-proxy/index.html），资源引用统一走 ASSET_CDN */
 const HOME_HTML = `<!DOCTYPE html>
 <html>
 <head>
     <title>Docker Hub 镜像搜索</title>
     <meta charset="UTF-8">
-	<link rel="shortcut icon" href="https://cdn.jsdelivr.net/gh/KuwiNet/kuwinet.github.io@2c3a1ee8f478a64eee4637d174ef35e55685acac/favicon.ico">
+	<link rel="shortcut icon" href="${ASSET_CDN}/favicon.ico">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
 	<!-- Bootstrap CSS -->
 	<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.1/dist/css/bootstrap.min.css">
 	<!-- Custom CSS -->
-	<link href="https://cdn.jsdelivr.net/gh/KuwiNet/kuwinet.github.io@2c3a1ee8f478a64eee4637d174ef35e55685acac/css/navbar.css" rel="stylesheet">
-	<link href="https://cdn.jsdelivr.net/gh/KuwiNet/kuwinet.github.io@2c3a1ee8f478a64eee4637d174ef35e55685acac/css/basic.css" rel="stylesheet">
-	<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/KuwiNet/kuwinet.github.io@2c3a1ee8f478a64eee4637d174ef35e55685acac/d-proxy/style.css">
+	<link href="${ASSET_CDN}/css/navbar.css" rel="stylesheet">
+	<link href="${ASSET_CDN}/css/basic.css" rel="stylesheet">
+	<link rel="stylesheet" href="${ASSET_CDN}/d-proxy/style.css">
 </head>
 <body>
 	<nav class="navbar navbar-expand-custom navbar-mainbg">
@@ -96,7 +102,7 @@ const HOME_HTML = `<!DOCTYPE html>
 	        </div>
 	    </div>
 	</nav>
-				  
+					  
     <div class="container">
         <div class="search-container">
             <input type="text" id="search-input" placeholder="输入关键词搜索镜像，如: nginx, mysql, redis...">
@@ -154,8 +160,8 @@ sudo systemctl restart docker</code>
 	<script src="https://cdn.jsdelivr.net/npm/bootstrap@4.5.2/dist/js/bootstrap.min.js"></script>
 	
 	<!-- Custom JS -->
-	<script src="https://cdn.jsdelivr.net/gh/KuwiNet/kuwinet.github.io@2c3a1ee8f478a64eee4637d174ef35e55685acac/js/navbar.js"></script>
-	<script src="https://cdn.jsdelivr.net/gh/KuwiNet/kuwinet.github.io@2c3a1ee8f478a64eee4637d174ef35e55685acac/d-proxy/script.js"></script>
+	<script src="${ASSET_CDN}/js/navbar.js"></script>
+	<script src="${ASSET_CDN}/d-proxy/script.js"></script>
 </body>
 </html>
 `
@@ -679,6 +685,7 @@ export default {
 				upstream: resolveUpstream(url, cfg),
 				base: selfBase(url, cfg),
 				builtinHome: cfg.builtinHome,
+				assetCommit: ASSET_COMMIT,
 				time: new Date().toISOString(),
 			})
 		}
