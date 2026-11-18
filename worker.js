@@ -55,7 +55,7 @@ const DEFAULT_REGISTRY = 'registry-1.docker.io'
 const DEFAULT_HOME_PAGE_URL = 'https://kuwinet.github.io/d-proxy'
 
 /** 静态资源版本：jsDelivr 固定 commit（换版本只改这一行） */
-const ASSET_COMMIT = '46b34932d2709c829ce01c47d1e8cd807f1b221d'
+const ASSET_COMMIT = 'd0b89bcba2e3430fdc7b3870c9e6f54529390cb3'
 const ASSET_CDN = 'https://cdn.jsdelivr.net/gh/KuwiNet/kuwinet.github.io@' + ASSET_COMMIT
 
 /** 内置首页（原 d-proxy/index.html），资源引用统一走 ASSET_CDN */
