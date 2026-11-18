@@ -62,6 +62,13 @@ const ASSET_CDN = 'https://cdn.jsdelivr.net/gh/KuwiNet/kuwinet.github.io@' + ASS
 const HOME_HTML = `<!DOCTYPE html>
 <html>
 <head>
+    <!-- Google Tag Manager -->
+    <script async src="https://www.googletagmanager.com/gtm.js?id=GTM-5VJCB5WG"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+    </script>
     <title>Docker Hub 镜像搜索</title>
     <meta charset="UTF-8">
     <link rel="shortcut icon" href="${ASSET_CDN}/favicon.ico">
