@@ -55,7 +55,7 @@ const DEFAULT_REGISTRY = 'registry-1.docker.io'
 const DEFAULT_HOME_PAGE_URL = 'https://kuwinet.github.io/d-proxy'
 
 /** 静态资源版本：jsDelivr 固定 commit（换版本只改这一行） */
-const ASSET_COMMIT = 'de89117d31e506f0f5e754d334e3d9918c780814'
+const ASSET_COMMIT = '2429ac95e6f0379e2d99abfadab658bd82596392'
 const ASSET_CDN = 'https://cdn.jsdelivr.net/gh/KuwiNet/kuwinet.github.io@' + ASSET_COMMIT
 
 /** 内置首页（原 d-proxy/index.html），资源引用统一走 ASSET_CDN */
@@ -71,6 +71,7 @@ const HOME_HTML = `<!DOCTYPE html>
     <!-- Custom CSS -->
     <link href="${ASSET_CDN}/css/navbar.css" rel="stylesheet">
     <link href="${ASSET_CDN}/css/basic.css" rel="stylesheet">
+<link href="//at.alicdn.com/t/c/font_4892763_skkvi1iofje.css" rel="stylesheet">
     <link rel="stylesheet" href="${ASSET_CDN}/d-proxy/style.css">
 </head>
 <body>
@@ -87,16 +88,16 @@ const HOME_HTML = `<!DOCTYPE html>
                         <div class="right"></div>
                     </div>
                     <li class="nav-item">
-                        <a class="nav-link" href="https://oproxy.cc/"><span class="iconfont">&#xe7ab;</span> Github 加速</a>
+                        <a class="nav-link" href="https://oproxy.cc/"><span class="iconfont icon-github"></span> Github 加速</a>
                     </li>
                     <li class="nav-item active">
-                        <a class="nav-link" href="https://docker.oproxy.cc/"><span class="iconfont">&#xe6cc;</span> Docker 搜索</a>
+                        <a class="nav-link" href="https://docker.oproxy.cc/"><span class="iconfont icon-docker"></span> Docker 搜索</a>
                     </li>
                     <li class="nav-item">
-                        <a class="nav-link" href="https://kuwi.net/" target="_blank"><span class="iconfont">&#xe609;</span> KuWi 分享</a>
+                        <a class="nav-link" href="https://kuwi.net/" target="_blank"><span class="iconfont icon-KuWi"></span> KuWi</a>
                     </li>
                     <li class="nav-item">
-                        <a class="nav-link" href="https://www.afrp.net/" target="_blank"><span class="iconfont">&#xe6ea;</span> aFrp 免费FRP服务</a>
+                        <a class="nav-link" href="https://www.afrp.net/" target="_blank"><span class="iconfont icon-a"></span> AFRP内网穿透</a>
                     </li>
                 </ul>
             </div>
@@ -114,40 +115,22 @@ const HOME_HTML = `<!DOCTYPE html>
         </div>
         <div class="example">
             <div class="example-title"><span class="iconfont">&#xe655;</span>️️️ 基本使用示例：</div>
-            <p><span class="iconfont">&#xe600;</span>️️️ 在官方镜像路径前面加上本站域名</p>
-            <pre>
-                <button class="copy-button" data-clipboard-target="#code1">
-                    <span class="copy-icon">&#xe60f;</span>
-                </button>
-<code class="language-bash" id="code1">docker pull docker.oproxy.cc/snowdreamtech/frpc:latest</code>
-            </pre>
-            <pre>
-                <button class="copy-button" data-clipboard-target="#code2">
-                    <span class="copy-icon">&#xe60f;</span>
-                </button>
-<code class="language-bash" id="code2">docker pull docker.oproxy.cc/library/nginx:stable-alpine3.19-perl</code>
-            </pre>
+            <p><span class="iconfont">&#xe600;</span>️️️ 在官方镜像路径前面加上本站域名</p>            <pre><button class="copy-button" data-clipboard-target="#code1"><span class="copy-icon">&#xe60f;</span></button><code class="language-bash" id="code1">docker pull docker.oproxy.cc/snowdreamtech/frpc:latest</code></pre>            <pre><button class="copy-button" data-clipboard-target="#code2"><span class="copy-icon">&#xe60f;</span></button><code class="language-bash" id="code2">docker pull docker.oproxy.cc/library/nginx:stable-alpine3.19-perl</code></pre>
         </div>
         <div class="example">
             <div class="example-title"><span class="iconfont">&#xe617;</span>️️️ 一键设置镜像加速：</div>
-            <p><span class="iconfont">&#xe600;</span>️️️ 修改文件 <span class="tag">/etc/docker/daemon.json</span>（如果不存在则创建）</p>
-            <pre>
-                <button class="copy-button" data-clipboard-target="#code3">
-                    <span class="copy-icon">&#xe60f;</span>
-                </button>
-<code class="language-bash" id="code3">sudo mkdir -p /etc/docker
+            <p><span class="iconfont">&#xe600;</span>️️️ 修改文件 <span class="tag">/etc/docker/daemon.json</span>（如果不存在则创建）</p>            <pre><button class="copy-button" data-clipboard-target="#code3"><span class="copy-icon">&#xe60f;</span></button><code class="language-bash" id="code3">sudo mkdir -p /etc/docker
 sudo tee /etc/docker/daemon.json <<-'EOF'
 {
   "registry-mirrors": ["docker.oproxy.cc"]
 }
 EOF
 sudo systemctl daemon-reload
-sudo systemctl restart docker</code>
-            </pre>
+sudo systemctl restart docker</code></pre>
         </div>
         <p style="position: sticky;top: calc(100% - 2.5em);">
             <br><br>
-            Support by <a href="https://kuwi.net/" target="_blank"><span class="iconfont">&#xe609;</span> KuWi</a> ,  Run on <a href="https://workers.cloudflare.com/" target="_blank"><span class="iconfont">&#xebf2;</span> Cloudflare Workers</a> . Fonts made from <a href="http://www.onlinewebfonts.com" target="_blank">Web Fonts</a> is licensed by CC BY 4.0
+            Support by <a href="https://kuwi.net/" target="_blank"><span class="iconfont icon-KuWi"></span> KuWi</a> ,  Run on <a href="https://workers.cloudflare.com/" target="_blank"><span class="iconfont">&#xebf2;</span> Cloudflare Workers</a> . Fonts made from <a href="http://www.onlinewebfonts.com" target="_blank">Web Fonts</a> is licensed by CC BY 4.0
         </p>
     </div>
     <!-- jQuery -->
